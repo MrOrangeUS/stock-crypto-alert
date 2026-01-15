@@ -1,0 +1,11 @@
+{
+  "80f7a10a-98e6-4996-bf4a-0a3ecb8a4154": [
+    {
+      "id": "9dfd8e07-f555-4a8c-baf8-52546f6a1539",
+      "ticker": "AAPL",
+      "condition": "above",
+      "target": 50,
+      "triggered": true
+    }
+  ]
+}
