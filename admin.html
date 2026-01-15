@@ -3,11 +3,12 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Admin Login - Stock/Crypto SMS Alerts</title>
+  <title>Admin Dashboard - Stock/Crypto Alerts</title>
   <style>
     body {
       font-family: Arial, sans-serif;
       margin: 0;
+      padding: 0;
       background-color: #f5f5f5;
     }
     header {
@@ -17,7 +18,7 @@
       text-align: center;
     }
     main {
-      max-width: 400px;
+      max-width: 1000px;
       margin: 2rem auto;
       padding: 1rem;
       background-color: #fff;
@@ -25,14 +26,12 @@
       box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
     h2 {
-      margin-top: 0;
       color: #34495e;
+      margin-top: 1rem;
     }
-    input, button {
+    input, button, select {
       padding: 0.5rem;
       margin: 0.3rem 0;
-      width: 100%;
-      box-sizing: border-box;
     }
     button {
       background-color: #3498db;
@@ -47,8 +46,23 @@
     .hidden {
       display: none;
     }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 1rem;
+    }
+    th, td {
+      border: 1px solid #ddd;
+      padding: 0.5rem;
+    }
+    th {
+      background-color: #ecf0f1;
+    }
+    .error {
+      color: #c0392b;
+    }
     .message {
-      margin-top: 0.5rem;
+      color: #27ae60;
     }
   </style>
 </head>
@@ -57,34 +71,172 @@
     <h1>Admin Portal</h1>
   </header>
   <main>
-    <section id="login-form">
+    <section id="admin-login-section">
       <h2>Admin Login</h2>
-      <input type="text" id="admin-username" placeholder="Username">
-      <input type="password" id="admin-password" placeholder="Password">
+      <input type="email" id="admin-email" placeholder="Admin Email">
+      <input type="password" id="admin-password" placeholder="Admin Password">
       <button onclick="adminLogin()">Login</button>
-      <div id="login-msg" class="message"></div>
+      <div id="admin-login-msg" class="message"></div>
     </section>
     <section id="admin-dashboard" class="hidden">
-      <h2>Welcome, Admin</h2>
-      <p>You are now logged in. Add your admin controls here.</p>
+      <h2>Admin Dashboard</h2>
+      <button onclick="logout()">Logout</button>
+      <h3>Users</h3>
+      <table id="users-table">
+        <thead>
+          <tr><th>ID</th><th>Email</th><th>Phone</th><th>Verified</th><th>Role</th><th>Action</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <h3>Watchlists</h3>
+      <pre id="watchlists-json"></pre>
+      <h3>Alerts</h3>
+      <pre id="alerts-json"></pre>
+      <h3>Portfolios</h3>
+      <pre id="portfolios-json"></pre>
     </section>
   </main>
   <script>
-    const ADMIN_USERNAME = 'admin';
-    const ADMIN_PASSWORD = 'admin123';
-    function adminLogin() {
-      const username = document.getElementById('admin-username').value;
+    const API_BASE = '';
+
+    function getAdminHeaders() {
+      const token = localStorage.getItem('adminToken');
+      return token ? { 'Authorization': 'Bearer ' + token } : {};
+    }
+    async function adminLogin() {
+      const email = document.getElementById('admin-email').value;
       const password = document.getElementById('admin-password').value;
-      const msg = document.getElementById('login-msg');
-      if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
-        document.getElementById('login-form').classList.add('hidden');
+      const msgEl = document.getElementById('admin-login-msg');
+      msgEl.textContent = '';
+      try {
+        const res = await fetch(API_BASE + '/admin-login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Admin login failed');
+        localStorage.setItem('adminToken', data.token);
+        msgEl.textContent = 'Login successful!';
+        msgEl.classList.remove('error');
+        document.getElementById('admin-login-section').classList.add('hidden');
         document.getElementById('admin-dashboard').classList.remove('hidden');
-        msg.textContent = '';
-      } else {
-        msg.textContent = 'Invalid credentials. Please try again.';
-        msg.style.color = '#c0392b';
+        loadAdminData();
+      } catch (err) {
+        msgEl.textContent = err.message;
+        msgEl.classList.add('error');
       }
     }
+    function logout() {
+      localStorage.removeItem('adminToken');
+      document.getElementById('admin-dashboard').classList.add('hidden');
+      document.getElementById('admin-login-section').classList.remove('hidden');
+    }
+    async function loadAdminData() {
+      await loadUsers();
+      await loadWatchlists();
+      await loadAlerts();
+      await loadPortfolios();
+    }
+    async function loadUsers() {
+      const tbody = document.querySelector('#users-table tbody');
+      tbody.innerHTML = '';
+      try {
+        const res = await fetch(API_BASE + '/admin/users', { headers: getAdminHeaders() });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to fetch users');
+        data.users.forEach(user => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td>${user.id}</td><td>${user.email}</td><td>${user.phone}</td><td>${user.verified}</td>`;
+          const roleTd = document.createElement('td');
+          const select = document.createElement('select');
+          ['user','admin','moderator'].forEach(r => {
+            const opt = document.createElement('option');
+            opt.value = r;
+            opt.textContent = r;
+            if (user.role === r) opt.selected = true;
+            select.appendChild(opt);
+          });
+          roleTd.appendChild(select);
+          const actionTd = document.createElement('td');
+          const btn = document.createElement('button');
+          btn.textContent = 'Update';
+          btn.onclick = () => updateUserRole(user.id, select.value);
+          actionTd.appendChild(btn);
+          tr.appendChild(roleTd);
+          tr.appendChild(actionTd);
+          tbody.appendChild(tr);
+        });
+        if (data.users.length === 0) {
+          const tr = document.createElement('tr');
+          tr.innerHTML = '<td colspan="6">No users</td>';
+          tbody.appendChild(tr);
+        }
+      } catch (err) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td colspan="6" class="error">${err.message}</td>`;
+        tbody.appendChild(tr);
+      }
+    }
+    async function updateUserRole(userId, role) {
+      try {
+        const res = await fetch(API_BASE + '/admin/set-role', {
+          method: 'POST',
+          headers: Object.assign({ 'Content-Type': 'application/json' }, getAdminHeaders()),
+          body: JSON.stringify({ userId, role })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to update role');
+        loadUsers();
+      } catch (err) {
+        alert(err.message);
+      }
+    }
+    async function loadWatchlists() {
+      const pre = document.getElementById('watchlists-json');
+      pre.textContent = 'Loading...';
+      try {
+        const res = await fetch(API_BASE + '/admin/watchlists', { headers: getAdminHeaders() });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to fetch watchlists');
+        pre.textContent = JSON.stringify(data.watchlists, null, 2);
+      } catch (err) {
+        pre.textContent = err.message;
+      }
+    }
+    async function loadAlerts() {
+      const pre = document.getElementById('alerts-json');
+      pre.textContent = 'Loading...';
+      try {
+        const res = await fetch(API_BASE + '/admin/alerts', { headers: getAdminHeaders() });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to fetch alerts');
+        pre.textContent = JSON.stringify(data.alerts, null, 2);
+      } catch (err) {
+        pre.textContent = err.message;
+      }
+    }
+    async function loadPortfolios() {
+      const pre = document.getElementById('portfolios-json');
+      pre.textContent = 'Loading...';
+      try {
+        const res = await fetch(API_BASE + '/admin/portfolios', { headers: getAdminHeaders() });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to fetch portfolios');
+        pre.textContent = JSON.stringify(data.portfolios, null, 2);
+      } catch (err) {
+        pre.textContent = err.message;
+      }
+    }
+    // Auto‑login if adminToken exists
+    window.addEventListener('load', () => {
+      const token = localStorage.getItem('adminToken');
+      if (token) {
+        document.getElementById('admin-login-section').classList.add('hidden');
+        document.getElementById('admin-dashboard').classList.remove('hidden');
+        loadAdminData();
+      }
+    });
   </script>
 </body>
 </html>
