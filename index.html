@@ -113,6 +113,19 @@
       </select>
       <input type="number" id="alert-target" placeholder="Target Price">
       <button onclick="createAlert()">Create Alert</button>
+
+      <!-- Portfolio management -->
+      <h3>Your Portfolio</h3>
+      <div id="portfolio" class="list"></div>
+      <input type="text" id="portfolio-ticker" placeholder="Ticker (e.g. TSLA)">
+      <input type="number" id="portfolio-qty" placeholder="Quantity">
+      <button onclick="saveHolding()">Save Holding</button>
+
+      <!-- AI Prediction -->
+      <h3>AI Prediction</h3>
+      <input type="text" id="predict-ticker" placeholder="Ticker (e.g. AMZN)">
+      <button onclick="getPrediction()">Get Prediction</button>
+      <div id="prediction-result" class="message"></div>
     </section>
   </main>
   <script>
@@ -197,6 +210,7 @@
         showSection('dashboard-section');
         loadWatchlist();
         loadAlerts();
+        loadPortfolio();
       } catch (err) {
         msgEl.textContent = err.message;
         msgEl.classList.add('error');
@@ -324,6 +338,91 @@
       }
     }
 
+    // ----------------------- Portfolio functions -----------------------
+    async function loadPortfolio() {
+      const listEl = document.getElementById('portfolio');
+      listEl.textContent = 'Loading...';
+      try {
+        const res = await fetch(API_BASE + '/portfolio', { headers: getAuthHeaders() });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to fetch portfolio');
+        const portfolio = data.portfolio || [];
+        listEl.innerHTML = '';
+        portfolio.forEach(h => {
+          const div = document.createElement('div');
+          div.textContent = `${h.ticker} : ${h.quantity} `;
+          const btn = document.createElement('button');
+          btn.textContent = 'Remove';
+          btn.style.backgroundColor = '#e74c3c';
+          btn.style.marginLeft = '1rem';
+          btn.onclick = () => removeHolding(h.ticker);
+          div.appendChild(btn);
+          listEl.appendChild(div);
+        });
+        if (portfolio.length === 0) listEl.textContent = 'No holdings yet.';
+      } catch (err) {
+        listEl.textContent = err.message;
+      }
+    }
+    async function saveHolding() {
+      const ticker = document.getElementById('portfolio-ticker').value.trim();
+      const qty = parseFloat(document.getElementById('portfolio-qty').value);
+      if (!ticker || isNaN(qty)) {
+        alert('Please enter ticker and quantity');
+        return;
+      }
+      try {
+        const res = await fetch(API_BASE + '/portfolio', {
+          method: 'POST',
+          headers: Object.assign({ 'Content-Type': 'application/json' }, getAuthHeaders()),
+          body: JSON.stringify({ ticker, quantity: qty })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to save');
+        document.getElementById('portfolio-ticker').value = '';
+        document.getElementById('portfolio-qty').value = '';
+        loadPortfolio();
+      } catch (err) {
+        alert(err.message);
+      }
+    }
+    async function removeHolding(ticker) {
+      try {
+        const res = await fetch(API_BASE + '/portfolio/' + encodeURIComponent(ticker), {
+          method: 'DELETE',
+          headers: getAuthHeaders()
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to remove holding');
+        loadPortfolio();
+      } catch (err) {
+        alert(err.message);
+      }
+    }
+
+    // ----------------------- AI Prediction -----------------------
+    async function getPrediction() {
+      const ticker = document.getElementById('predict-ticker').value.trim();
+      const resultEl = document.getElementById('prediction-result');
+      resultEl.textContent = '';
+      if (!ticker) {
+        alert('Please enter a ticker');
+        return;
+      }
+      try {
+        const res = await fetch(API_BASE + '/predict?ticker=' + encodeURIComponent(ticker), {
+          headers: getAuthHeaders()
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to get prediction');
+        resultEl.textContent = `${data.ticker}: current $${data.currentPrice.toFixed(2)}, predicted $${data.predictedPrice.toFixed(2)}`;
+        resultEl.classList.remove('error');
+      } catch (err) {
+        resultEl.textContent = err.message;
+        resultEl.classList.add('error');
+      }
+    }
+
     // On load, show register form; if auth token exists, show dashboard
     window.addEventListener('load', () => {
       const token = localStorage.getItem('authToken');
@@ -331,6 +430,7 @@
         showSection('dashboard-section');
         loadWatchlist();
         loadAlerts();
+        loadPortfolio();
       } else {
         showSection('register-section');
       }
