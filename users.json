@@ -1,0 +1,10 @@
+[
+  {
+    "id": "80f7a10a-98e6-4996-bf4a-0a3ecb8a4154",
+    "email": "alice@example.com",
+    "passwordHash": "2bb80d537b1da3e38bd30361aa855686bde0eacd7162fef6a25fe97bf527a25b",
+    "phone": "+1234567890",
+    "verified": true,
+    "verificationCode": "321664"
+  }
+]
