@@ -21,6 +21,8 @@ const DATA_DIR = __dirname;
 const USERS_FILE = DATA_DIR + '/users.json';
 const WATCHLIST_FILE = DATA_DIR + '/watchlists.json';
 const ALERTS_FILE = DATA_DIR + '/alerts.json';
+// New file for storing user portfolios (holdings).
+const PORTFOLIO_FILE = DATA_DIR + '/portfolios.json';
 
 // Ensure JSON files exist
 function ensureFile(path, defaultValue) {
@@ -32,6 +34,7 @@ function ensureFile(path, defaultValue) {
 ensureFile(USERS_FILE, []);
 ensureFile(WATCHLIST_FILE, {});
 ensureFile(ALERTS_FILE, {});
+ensureFile(PORTFOLIO_FILE, {});
 
 // Read/Write helpers
 function readJSON(path) {
@@ -57,10 +60,66 @@ function generateToken() {
   return crypto.randomBytes(32).toString('base64');
 }
 
+// Admin credentials. In a production system these would be stored
+// securely (e.g. in environment variables or a database) and never
+// hard‑coded.  For this prototype we keep them here for simplicity.
+const ADMIN_EMAIL = 'admin@site.com';
+const ADMIN_PASSWORD_HASH = hashPassword('admin123');
+
 // In‑memory token store.  Maps token -> userId.  In a real
 // application this would be persisted (e.g. Redis) and have an
 // expiration.  Here it resets when the server restarts.
 const sessions = {};
+
+// Map admin tokens to a special id. When an admin logs in we
+// associate the token with this constant. It is used to grant
+// access to admin‑only endpoints.
+const ADMIN_SESSION_ID = '__admin__';
+
+// -----------------------------------------------------------------------------
+// Additional helper functions for portfolios and predictions
+//
+// This section introduces two helper functions used for the optional
+// portfolio management and AI prediction endpoints.  The simulatePrice
+// function uses a deterministic pseudo‑random hash seeded with the ticker and
+// time to generate a price in the range [10,100).  The predictNextPrice
+// function uses the same approach but advances the time bucket forward one
+// interval to produce a simple "next tick" prediction.  These functions
+// deliberately avoid external dependencies and network calls.  In a real
+// implementation you could integrate with market data APIs and AI models.
+
+/**
+ * Generate a pseudo‑random current price for a ticker.  The price is
+ * deterministic within a 30‑second window and varies between $10 and $100.
+ *
+ * @param {string} ticker
+ * @returns {number} simulated price
+ */
+function simulatePrice(ticker) {
+  // The time bucket is the current timestamp divided by 30 seconds.  Using
+  // bitwise or (| 0) floors the value.  This ensures that calls within the
+  // same 30‑second window return the same price for a given ticker.
+  const bucket = (Date.now() / 30000) | 0;
+  const seed = crypto.createHash('sha256').update(`${ticker}-${bucket}`).digest('hex');
+  const num = parseInt(seed.substring(0, 8), 16);
+  return 10 + (num % 9000) / 100;
+}
+
+/**
+ * Predict the next price for a ticker by looking one interval ahead.  This
+ * naive implementation simply uses the next 30‑second bucket.  It does not
+ * attempt to forecast trends or volatility; it merely illustrates how an
+ * endpoint might produce AI‑driven insights in the future.
+ *
+ * @param {string} ticker
+ * @returns {number} predicted price
+ */
+function predictNextPrice(ticker) {
+  const nextBucket = ((Date.now() / 30000) | 0) + 1;
+  const seed = crypto.createHash('sha256').update(`${ticker}-${nextBucket}`).digest('hex');
+  const num = parseInt(seed.substring(0, 8), 16);
+  return 10 + (num % 9000) / 100;
+}
 
 // Simulated SMS sending.  In a production system, integrate with
 // Twilio or another provider.  Here we simply log the message to
@@ -103,6 +162,18 @@ function authenticate(req) {
   return userId || null;
 }
 
+// Determine whether the provided request carries a valid admin token.
+// Returns true if the bearer token corresponds to the special admin
+// session id; otherwise false.
+function isAdmin(req) {
+  const auth = req.headers['authorization'];
+  if (!auth) return false;
+  const parts = auth.split(' ');
+  if (parts.length !== 2 || parts[0] !== 'Bearer') return false;
+  const token = parts[1];
+  return sessions[token] === ADMIN_SESSION_ID;
+}
+
 // HTTP server
 const server = http.createServer(async (req, res) => {
   const parsedUrl = url.parse(req.url, true);
@@ -143,7 +214,11 @@ const server = http.createServer(async (req, res) => {
         passwordHash: hashPassword(password),
         phone,
         verified: false,
-        verificationCode
+        verificationCode,
+        // By default all newly registered users are regular users.  The
+        // role property can later be elevated by an admin through a
+        // dedicated API endpoint.
+        role: 'user'
       };
       users.push(newUser);
       writeJSON(USERS_FILE, users);
@@ -217,6 +292,25 @@ const server = http.createServer(async (req, res) => {
       sessions[token] = user.id;
       res.writeHead(200);
       res.end(JSON.stringify({ token }));
+      return;
+    }
+
+    // Admin login. Requires the preconfigured admin email and
+    // password. Returns a token that grants access to admin
+    // endpoints.  The admin account does not correspond to a user in
+    // the users.json file.  Instead, it is handled separately.
+    if (method === 'POST' && pathname === '/admin-login') {
+      const body = await parseJSONBody(req);
+      const { email, password } = body;
+      if (email !== ADMIN_EMAIL || hashPassword(password) !== ADMIN_PASSWORD_HASH) {
+        res.writeHead(401);
+        res.end(JSON.stringify({ error: 'Invalid admin credentials' }));
+        return;
+      }
+      const token = generateToken();
+      sessions[token] = ADMIN_SESSION_ID;
+      res.writeHead(200);
+      res.end(JSON.stringify({ token, admin: true }));
       return;
     }
     // Get current user info
@@ -338,6 +432,199 @@ const server = http.createServer(async (req, res) => {
       const alerts = readJSON(ALERTS_FILE);
       res.writeHead(200);
       res.end(JSON.stringify({ alerts: alerts[userId] || [] }));
+      return;
+    }
+
+    // -------------------------------------------------------------------------
+    // Portfolio management
+    //
+    // A portfolio is a list of holdings for each user.  Each holding consists
+    // of a ticker symbol and a quantity.  These endpoints allow users to
+    // view, add and remove holdings from their portfolio.  Data is persisted
+    // in the portfolios.json file.  A real application would include
+    // transaction history and cost basis; here we keep it simple.
+
+    // Get the current user's portfolio
+    if (method === 'GET' && pathname === '/portfolio') {
+      const userId = authenticate(req);
+      if (!userId) {
+        res.writeHead(401);
+        res.end(JSON.stringify({ error: 'Unauthorized' }));
+        return;
+      }
+      const portfolios = readJSON(PORTFOLIO_FILE);
+      res.writeHead(200);
+      res.end(JSON.stringify({ portfolio: portfolios[userId] || [] }));
+      return;
+    }
+    // Add or update a holding in the portfolio
+    if (method === 'POST' && pathname === '/portfolio') {
+      const userId = authenticate(req);
+      if (!userId) {
+        res.writeHead(401);
+        res.end(JSON.stringify({ error: 'Unauthorized' }));
+        return;
+      }
+      const body = await parseJSONBody(req);
+      const { ticker, quantity } = body;
+      if (!ticker || typeof quantity !== 'number' || !Number.isFinite(quantity)) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: 'ticker and numeric quantity are required' }));
+        return;
+      }
+      const symbol = ticker.toUpperCase();
+      const portfolios = readJSON(PORTFOLIO_FILE);
+      if (!portfolios[userId]) portfolios[userId] = [];
+      const holdingIndex = portfolios[userId].findIndex(h => h.ticker === symbol);
+      if (holdingIndex >= 0) {
+        // Update existing quantity
+        portfolios[userId][holdingIndex].quantity = quantity;
+      } else {
+        // Add new holding
+        portfolios[userId].push({ ticker: symbol, quantity });
+      }
+      writeJSON(PORTFOLIO_FILE, portfolios);
+      res.writeHead(201);
+      res.end(JSON.stringify({ message: 'Holding saved', portfolio: portfolios[userId] }));
+      return;
+    }
+    // Remove a holding by ticker symbol
+    if (method === 'DELETE' && pathname.startsWith('/portfolio/')) {
+      const userId = authenticate(req);
+      if (!userId) {
+        res.writeHead(401);
+        res.end(JSON.stringify({ error: 'Unauthorized' }));
+        return;
+      }
+      const parts = pathname.split('/');
+      const symbol = parts[2] ? parts[2].toUpperCase() : null;
+      if (!symbol) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: 'Ticker symbol required' }));
+        return;
+      }
+      const portfolios = readJSON(PORTFOLIO_FILE);
+      if (!portfolios[userId]) portfolios[userId] = [];
+      portfolios[userId] = portfolios[userId].filter(h => h.ticker !== symbol);
+      writeJSON(PORTFOLIO_FILE, portfolios);
+      res.writeHead(200);
+      res.end(JSON.stringify({ message: 'Holding removed', portfolio: portfolios[userId] }));
+      return;
+    }
+
+    // -------------------------------------------------------------------------
+    // AI prediction endpoint
+    //
+    // The /predict endpoint returns a naive price prediction for a given
+    // ticker.  It uses the helper functions simulatePrice and
+    // predictNextPrice defined above.  Only authenticated users may access
+    // predictions.  In the future this could integrate with ML models.
+    if (method === 'GET' && (pathname === '/predict' || pathname.startsWith('/predict/'))) {
+      const userId = authenticate(req);
+      if (!userId) {
+        res.writeHead(401);
+        res.end(JSON.stringify({ error: 'Unauthorized' }));
+        return;
+      }
+      // Determine ticker from query string or path
+      let ticker = null;
+      if (pathname === '/predict') {
+        ticker = parsedUrl.query.ticker;
+      } else {
+        const parts = pathname.split('/');
+        ticker = parts[2];
+      }
+      if (!ticker) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: 'ticker parameter is required' }));
+        return;
+      }
+      const symbol = ticker.toUpperCase();
+      const current = simulatePrice(symbol);
+      const predicted = predictNextPrice(symbol);
+      res.writeHead(200);
+      res.end(JSON.stringify({ ticker: symbol, currentPrice: current, predictedPrice: predicted }));
+      return;
+    }
+
+    // Admin endpoint: list all users. Requires an admin token.
+    if (method === 'GET' && pathname === '/admin/users') {
+      if (!isAdmin(req)) {
+        res.writeHead(401);
+        res.end(JSON.stringify({ error: 'Unauthorized' }));
+        return;
+      }
+      const users = readJSON(USERS_FILE).map(u => ({ id: u.id, email: u.email, phone: u.phone, verified: u.verified, role: u.role }));
+      res.writeHead(200);
+      res.end(JSON.stringify({ users }));
+      return;
+    }
+
+    // Admin endpoint: list all watchlists. Requires admin token.
+    if (method === 'GET' && pathname === '/admin/watchlists') {
+      if (!isAdmin(req)) {
+        res.writeHead(401);
+        res.end(JSON.stringify({ error: 'Unauthorized' }));
+        return;
+      }
+      const watchlists = readJSON(WATCHLIST_FILE);
+      res.writeHead(200);
+      res.end(JSON.stringify({ watchlists }));
+      return;
+    }
+
+    // Admin endpoint: list all alerts. Requires admin token.
+    if (method === 'GET' && pathname === '/admin/alerts') {
+      if (!isAdmin(req)) {
+        res.writeHead(401);
+        res.end(JSON.stringify({ error: 'Unauthorized' }));
+        return;
+      }
+      const alerts = readJSON(ALERTS_FILE);
+      res.writeHead(200);
+      res.end(JSON.stringify({ alerts }));
+      return;
+    }
+
+    // Admin endpoint: update a user's role. Expects JSON body
+    // { userId: string, role: string } and requires admin token.
+    if (method === 'POST' && pathname === '/admin/set-role') {
+      if (!isAdmin(req)) {
+        res.writeHead(401);
+        res.end(JSON.stringify({ error: 'Unauthorized' }));
+        return;
+      }
+      const body = await parseJSONBody(req);
+      const { userId: targetId, role } = body;
+      if (!targetId || !role) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: 'userId and role are required' }));
+        return;
+      }
+      const users = readJSON(USERS_FILE);
+      const user = users.find(u => u.id === targetId);
+      if (!user) {
+        res.writeHead(404);
+        res.end(JSON.stringify({ error: 'User not found' }));
+        return;
+      }
+      user.role = role;
+      writeJSON(USERS_FILE, users);
+      res.writeHead(200);
+      res.end(JSON.stringify({ message: 'User role updated' }));
+      return;
+    }
+
+    // Admin endpoint: list all portfolios. Requires admin token.
+    if (method === 'GET' && pathname === '/admin/portfolios') {
+      if (!isAdmin(req)) {
+        res.writeHead(401);
+        res.end(JSON.stringify({ error: 'Unauthorized' }));
+        return;
+      }
+      const portfolios = readJSON(PORTFOLIO_FILE);
+      res.writeHead(200);
+      res.end(JSON.stringify({ portfolios }));
       return;
     }
     // Default: not found
